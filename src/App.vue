@@ -253,6 +253,7 @@ function buildRow(
 
 const totalPhotoCount = photos.length
 const sectionCount = timelineSections.length
+const photoIndexById = new Map<string, number>(photos.map((photo, index) => [photo.id, index]))
 
 const containerWidth = ref(0)
 const previewPhoto = ref<PhotoAsset | null>(null)
@@ -290,6 +291,16 @@ const getPreviewDisplayRect = (photo: PhotoAsset | null) => {
 
 const waitForNextPaint = () =>
   new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+
+const getTileEl = (photoId: string) =>
+  document.querySelector<HTMLElement>(`[data-photo-id="${photoId}"]`)
+
+const isTileFullyVisible = (tileEl: HTMLElement, containerEl: HTMLElement) => {
+  const tileRect = tileEl.getBoundingClientRect()
+  const containerRect = containerEl.getBoundingClientRect()
+
+  return tileRect.top >= containerRect.top + 1 && tileRect.bottom <= containerRect.bottom - 1
+}
 
 const getSourceImageRect = (photoId: string) => {
   const sourceImage = document.querySelector<HTMLImageElement>(
@@ -448,7 +459,22 @@ const closePreview = async () => {
 }
 
 useEventListener(window, 'keydown', (event: KeyboardEvent) => {
-  if (event.key === 'Escape' && previewPhoto.value) {
+  if (!previewPhoto.value)
+    return
+
+  if (event.key === 'ArrowLeft') {
+    event.preventDefault()
+    showPreviousPreview()
+    return
+  }
+
+  if (event.key === 'ArrowRight') {
+    event.preventDefault()
+    showNextPreview()
+    return
+  }
+
+  if (event.key === 'Escape') {
     event.preventDefault()
     if (document.activeElement instanceof HTMLElement)
       document.activeElement.blur()
@@ -612,6 +638,81 @@ const { list: virtualRows, containerProps, wrapperProps, scrollTo } = useVirtual
   },
 )
 
+const photoRowIndexById = computed(() => {
+  const map = new Map<string, number>()
+
+  timelineBlocks.value.forEach((block, index) => {
+    if (block.kind !== 'row')
+      return
+
+    block.row.items.forEach(item => map.set(item.id, index))
+  })
+
+  return map
+})
+
+const currentPreviewIndex = computed(() => {
+  if (!previewPhoto.value)
+    return -1
+
+  return photoIndexById.get(previewPhoto.value.id) ?? -1
+})
+
+const hasPrevPhoto = computed(() => currentPreviewIndex.value > 0)
+const hasNextPhoto = computed(() =>
+  currentPreviewIndex.value >= 0 && currentPreviewIndex.value < photos.length - 1,
+)
+
+const ensurePhotoVisibleInList = async (photoId: string) => {
+  const containerEl = containerProps.ref.value
+  if (!containerEl)
+    return
+
+  const currentTile = getTileEl(photoId)
+  if (currentTile && isTileFullyVisible(currentTile, containerEl))
+    return
+
+  const rowIndex = photoRowIndexById.value.get(photoId)
+  if (rowIndex !== undefined) {
+    scrollTo(rowIndex)
+    await nextTick()
+    await waitForNextPaint()
+  }
+
+  const afterScrollTile = getTileEl(photoId)
+  if (afterScrollTile && !isTileFullyVisible(afterScrollTile, containerEl)) {
+    afterScrollTile.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  }
+}
+
+const switchPreviewToIndex = async (index: number) => {
+  if (transitionRunning.value)
+    return
+
+  const nextPhoto = photos[index]
+  if (!nextPhoto)
+    return
+
+  previewPhoto.value = nextPhoto
+  activeSourcePhotoId.value = nextPhoto.id
+  await nextTick()
+  await ensurePhotoVisibleInList(nextPhoto.id)
+}
+
+const showPreviousPreview = () => {
+  if (!hasPrevPhoto.value)
+    return
+
+  switchPreviewToIndex(currentPreviewIndex.value - 1)
+}
+
+const showNextPreview = () => {
+  if (!hasNextPhoto.value)
+    return
+
+  switchPreviewToIndex(currentPreviewIndex.value + 1)
+}
+
 const { width: viewportWidth } = useElementSize(containerProps.ref)
 watch(viewportWidth, width => {
   containerWidth.value = width
@@ -697,6 +798,22 @@ const rowCount = computed(
     >
       <button type="button" class="preview-close" @click="closePreview">
         关闭
+      </button>
+      <button
+        type="button"
+        class="preview-nav preview-nav-prev"
+        :disabled="!hasPrevPhoto"
+        @click="showPreviousPreview"
+      >
+        上一张
+      </button>
+      <button
+        type="button"
+        class="preview-nav preview-nav-next"
+        :disabled="!hasNextPhoto"
+        @click="showNextPreview"
+      >
+        下一张
       </button>
       <img
         ref="previewImageRef"
@@ -924,6 +1041,31 @@ h1 {
   cursor: pointer;
 }
 
+.preview-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  border: 1px solid rgba(148, 163, 184, 0.5);
+  background: rgba(15, 23, 42, 0.82);
+  color: #f8fafc;
+  padding: 10px 12px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.preview-nav:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.preview-nav-prev {
+  left: 16px;
+}
+
+.preview-nav-next {
+  right: 16px;
+}
+
 .preview-image {
   width: 100vw;
   height: 100svh;
@@ -957,6 +1099,19 @@ h1 {
 
   .virtual-viewport {
     padding: 6px 12px 0;
+  }
+
+  .preview-nav {
+    padding: 8px 10px;
+    font-size: 12px;
+  }
+
+  .preview-nav-prev {
+    left: 8px;
+  }
+
+  .preview-nav-next {
+    right: 8px;
   }
 
   .inline-segment-title {
