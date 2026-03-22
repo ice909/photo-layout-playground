@@ -334,10 +334,12 @@ const openPreview = async (photo: RowPhoto, event?: Event) => {
 
   transitionRunning.value = true
   activeSourcePhotoId.value = photo.id
+  const triggerEl = event?.currentTarget instanceof HTMLElement ? event.currentTarget : null
   const sourceRect
-    = event?.currentTarget instanceof HTMLElement
-      ? event.currentTarget.querySelector('img')?.getBoundingClientRect() ?? null
+    = triggerEl
+      ? triggerEl.querySelector('img')?.getBoundingClientRect() ?? null
       : getSourceImageRect(photo.id)
+  triggerEl?.blur()
 
   previewPhoto.value = photo
   previewImageVisible.value = false
@@ -447,6 +449,9 @@ const closePreview = async () => {
 
 useEventListener(window, 'keydown', (event: KeyboardEvent) => {
   if (event.key === 'Escape' && previewPhoto.value) {
+    event.preventDefault()
+    if (document.activeElement instanceof HTMLElement)
+      document.activeElement.blur()
     closePreview()
   }
 })
@@ -849,6 +854,10 @@ h1 {
   box-shadow: 0 6px 20px rgba(10, 25, 41, 0.16);
   background: linear-gradient(135deg, #dbe7f3 0%, #f8fbff 100%);
   cursor: zoom-in;
+}
+
+.tile:focus {
+  outline: none;
 }
 
 .tile.is-shared-source img,
