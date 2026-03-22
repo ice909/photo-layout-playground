@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useElementSize, useEventListener, useVirtualList } from '@vueuse/core'
 
 interface PhotoAsset {
@@ -256,19 +256,203 @@ const sectionCount = timelineSections.length
 
 const containerWidth = ref(0)
 const previewPhoto = ref<PhotoAsset | null>(null)
+const previewImageVisible = ref(false)
+const activeSourcePhotoId = ref<string | null>(null)
+const previewImageRef = ref<HTMLImageElement | null>(null)
+const transitionRunning = ref(false)
+let ghostImageEl: HTMLImageElement | null = null
+type RectShape = { left: number, top: number, width: number, height: number }
 
-const openPreview = (photo: RowPhoto) => {
-  previewPhoto.value = photo
+const getContainRect = (
+  containerRect: DOMRect,
+  mediaWidth: number,
+  mediaHeight: number,
+): RectShape => {
+  const scale = Math.min(
+    containerRect.width / mediaWidth,
+    containerRect.height / mediaHeight,
+  )
+  const width = mediaWidth * scale
+  const height = mediaHeight * scale
+  const left = containerRect.left + (containerRect.width - width) / 2
+  const top = containerRect.top + (containerRect.height - height) / 2
+
+  return { left, top, width, height }
 }
 
-const closePreview = () => {
+const getPreviewDisplayRect = (photo: PhotoAsset | null) => {
+  const containerRect = previewImageRef.value?.getBoundingClientRect()
+  if (!containerRect || !photo)
+    return null
+
+  return getContainRect(containerRect, photo.width, photo.height)
+}
+
+const waitForNextPaint = () =>
+  new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+
+const getSourceImageRect = (photoId: string) => {
+  const sourceImage = document.querySelector<HTMLImageElement>(
+    `[data-photo-id="${photoId}"] img`,
+  )
+  return sourceImage?.getBoundingClientRect() ?? null
+}
+
+const mountGhostImage = (src: string, fromRect: RectShape) => {
+  const ghost = document.createElement('img')
+  ghost.src = src
+  ghost.alt = ''
+  ghost.style.position = 'fixed'
+  ghost.style.left = `${fromRect.left}px`
+  ghost.style.top = `${fromRect.top}px`
+  ghost.style.width = `${fromRect.width}px`
+  ghost.style.height = `${fromRect.height}px`
+  ghost.style.objectFit = 'cover'
+  ghost.style.margin = '0'
+  ghost.style.padding = '0'
+  ghost.style.border = '0'
+  ghost.style.pointerEvents = 'none'
+  ghost.style.zIndex = '140'
+  ghost.style.transformOrigin = 'top left'
+  ghost.style.willChange = 'left, top, width, height, opacity'
+  document.body.appendChild(ghost)
+  ghostImageEl = ghost
+  return ghost
+}
+
+const cleanupGhostImage = () => {
+  if (!ghostImageEl)
+    return
+
+  ghostImageEl.remove()
+  ghostImageEl = null
+}
+
+const openPreview = async (photo: RowPhoto, event?: Event) => {
+  if (transitionRunning.value)
+    return
+
+  transitionRunning.value = true
+  activeSourcePhotoId.value = photo.id
+  const sourceRect
+    = event?.currentTarget instanceof HTMLElement
+      ? event.currentTarget.querySelector('img')?.getBoundingClientRect() ?? null
+      : getSourceImageRect(photo.id)
+
+  previewPhoto.value = photo
+  previewImageVisible.value = false
+  await nextTick()
+
+  const targetRect = getPreviewDisplayRect(photo)
+
+  if (sourceRect && targetRect) {
+    cleanupGhostImage()
+    const ghost = mountGhostImage(photo.src, sourceRect)
+
+    try {
+      await ghost.animate(
+        [
+          {
+            left: `${sourceRect.left}px`,
+            top: `${sourceRect.top}px`,
+            width: `${sourceRect.width}px`,
+            height: `${sourceRect.height}px`,
+            opacity: 1,
+          },
+          {
+            left: `${targetRect.left}px`,
+            top: `${targetRect.top}px`,
+            width: `${targetRect.width}px`,
+            height: `${targetRect.height}px`,
+            opacity: 1,
+          },
+        ],
+        {
+          duration: 340,
+          easing: 'cubic-bezier(0.2, 0.7, 0.2, 1)',
+          fill: 'forwards',
+        },
+      ).finished
+    }
+    catch {
+      // Ignore animation interruptions and fall back to direct preview state.
+    }
+
+    previewImageVisible.value = true
+    await nextTick()
+    await waitForNextPaint()
+    cleanupGhostImage()
+    transitionRunning.value = false
+    return
+  }
+
+  previewImageVisible.value = true
+  transitionRunning.value = false
+}
+
+const closePreview = async () => {
+  if (!previewPhoto.value || transitionRunning.value)
+    return
+
+  transitionRunning.value = true
+  const closingPhoto = previewPhoto.value
+  const fromRect = getPreviewDisplayRect(closingPhoto)
+  const toRect = getSourceImageRect(closingPhoto.id)
+
+  if (fromRect && toRect) {
+    cleanupGhostImage()
+    const ghost = mountGhostImage(closingPhoto.src, fromRect)
+    previewImageVisible.value = false
+
+    try {
+      await ghost.animate(
+        [
+          {
+            left: `${fromRect.left}px`,
+            top: `${fromRect.top}px`,
+            width: `${fromRect.width}px`,
+            height: `${fromRect.height}px`,
+            opacity: 1,
+          },
+          {
+            left: `${toRect.left}px`,
+            top: `${toRect.top}px`,
+            width: `${toRect.width}px`,
+            height: `${toRect.height}px`,
+            opacity: 1,
+          },
+        ],
+        {
+          duration: 300,
+          easing: 'cubic-bezier(0.4, 0, 0.2, 1)',
+          fill: 'forwards',
+        },
+      ).finished
+    }
+    catch {
+      // Ignore animation interruptions and continue closing.
+    }
+    finally {
+      cleanupGhostImage()
+    }
+  }
+  else {
+    previewImageVisible.value = false
+  }
+
   previewPhoto.value = null
+  activeSourcePhotoId.value = null
+  transitionRunning.value = false
 }
 
 useEventListener(window, 'keydown', (event: KeyboardEvent) => {
   if (event.key === 'Escape' && previewPhoto.value) {
     closePreview()
   }
+})
+
+onBeforeUnmount(() => {
+  cleanupGhostImage()
 })
 
 const timelineBlocks = computed<TimelineBlock[]>(() => {
@@ -471,6 +655,8 @@ const rowCount = computed(
               v-for="photo in block.row.items"
               :key="photo.id"
               class="tile"
+              :class="{ 'is-shared-source': activeSourcePhotoId === photo.id && !!previewPhoto }"
+              :data-photo-id="photo.id"
               role="button"
               tabindex="0"
               :style="{
@@ -478,9 +664,9 @@ const rowCount = computed(
                 height: `${photo.frameHeight}px`,
                 marginRight: `${photo.gapAfter}px`,
               }"
-              @click="openPreview(photo)"
-              @keydown.enter.prevent="openPreview(photo)"
-              @keydown.space.prevent="openPreview(photo)"
+              @click="openPreview(photo, $event)"
+              @keydown.enter.prevent="openPreview(photo, $event)"
+              @keydown.space.prevent="openPreview(photo, $event)"
             >
               <span v-if="photo.inlineTitle" class="inline-segment-title">{{ photo.inlineTitle }}</span>
               <img
@@ -508,7 +694,9 @@ const rowCount = computed(
         关闭
       </button>
       <img
+        ref="previewImageRef"
         class="preview-image"
+        :class="{ 'is-hidden': !previewImageVisible }"
         :src="previewPhoto.src"
         :alt="previewPhoto.alt"
       >
@@ -663,6 +851,12 @@ h1 {
   cursor: zoom-in;
 }
 
+.tile.is-shared-source img,
+.tile.is-shared-source figcaption,
+.tile.is-shared-source .inline-segment-title {
+  opacity: 0;
+}
+
 .inline-segment-title {
   position: absolute;
   left: 0;
@@ -726,6 +920,11 @@ h1 {
   height: 100svh;
   object-fit: contain;
   box-shadow: 0 10px 48px rgba(0, 0, 0, 0.34);
+  opacity: 1;
+}
+
+.preview-image.is-hidden {
+  opacity: 0;
 }
 
 .preview-meta {
